@@ -197,6 +197,14 @@ async function main() {
     }
   }
 
+  // ha-linky-plus addition
+  for (const config of userConfig.meters) {
+    if (config?.action === 'sync' && !config.production) {
+      await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
+    }
+  }
+  // end of ha-linky-plus addition
+
   haClient.disconnect();
 
   // Setup cron job
@@ -216,6 +224,14 @@ async function main() {
         await sync(config);
       }
     }
+
+    // ha-linky-plus addition
+    for (const config of userConfig.meters) {
+      if (config.action === 'sync' && !config.production) {
+        await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
+      }
+    }
+    // end of ha-linky-plus addition
 
     haClient.disconnect();
   });

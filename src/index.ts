@@ -10,7 +10,7 @@ import dayjs from 'dayjs';
 
 const HA_HTTP_URL = (process.env.WS_URL || 'ws://supervisor/core/websocket')
   .replace(/^ws/, 'http')
-  .replace('/websocket', '');
+  .replace('/api/websocket', '');
 
 const TOKEN = process.env.SUPERVISOR_TOKEN;
 

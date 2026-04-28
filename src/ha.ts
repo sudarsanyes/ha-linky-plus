@@ -8,6 +8,12 @@ import { StatisticDataPoint } from './format.js';
 const WS_URL = process.env.WS_URL || 'ws://supervisor/core/websocket';
 const TOKEN = process.env.SUPERVISOR_TOKEN;
 
+// ha-linky-plus addition
+const HA_HTTP_URL = (process.env.WS_URL || 'ws://supervisor/core/websocket')
+  .replace(/^ws/, 'http')
+  .replace('/websocket', '');
+// end-of-ha-linky-plus addition
+
 export type SuccessMessage = {
   id: string;
   type: string;
@@ -246,4 +252,93 @@ export class HomeAssistantClient {
 
     return resultWithUnit;
   }
+
+  // ha-linky-plus addition
+  public async publishSensorStates(args: { prm: string; isProduction: boolean; overhead?: number }): Promise<void> {
+  const { prm, isProduction, overhead = 0.826 } = args;
+
+  const statisticId = getStatisticId({ prm, isProduction, isCost: false });
+  const statisticIdCost = getStatisticId({ prm, isProduction, isCost: true });
+
+  // Yesterday's window
+  const startTime = dayjs().subtract(1, 'day').startOf('day').format('YYYY-MM-DDT00:00:00.00Z');
+  const endTime = dayjs().startOf('day').format('YYYY-MM-DDT00:00:00.00Z');
+
+  // Fetch yesterday's consumption (Wh)
+  const consumptionData = await this.sendMessage({
+    type: 'recorder/statistics_during_period',
+    start_time: startTime,
+    end_time: endTime,
+    statistic_ids: [statisticId],
+    period: 'day',
+  });
+
+  // Fetch yesterday's cost (€)
+  const costData = await this.sendMessage({
+    type: 'recorder/statistics_during_period',
+    start_time: startTime,
+    end_time: endTime,
+    statistic_ids: [statisticIdCost],
+    period: 'day',
+  });
+
+  const consumptionPoints = consumptionData.result[statisticId];
+  const costPoints = costData.result[statisticIdCost];
+
+  if (!consumptionPoints || consumptionPoints.length === 0) {
+    warn('publishSensorStates: no consumption data found for yesterday');
+    return;
+  }
+
+  // "change" = delta for that day
+  const whYesterday: number = consumptionPoints[consumptionPoints.length - 1].change ?? 0;
+  const kwhYesterday: number = Math.round((whYesterday / 1000) * 100) / 100;
+
+  const costRaw: number = costPoints && costPoints.length > 0
+    ? (costPoints[costPoints.length - 1].change ?? 0)
+    : 0;
+  const costWithOverhead: number = Math.round((costRaw + overhead) * 100) / 100;
+
+  const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+
+  // Push states via HA REST API
+  const headers = {
+    'Authorization': `Bearer ${TOKEN}`,
+    'Content-Type': 'application/json',
+  };
+
+  await fetch(`${HA_HTTP_URL}/api/states/sensor.linky_yesterday_kwh`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      state: kwhYesterday,
+      attributes: {
+        unit_of_measurement: 'kWh',
+        friendly_name: 'Linky Yesterday Consumption',
+        device_class: 'energy',
+        state_class: 'measurement',
+        date: yesterday,
+      },
+    }),
+  });
+
+  await fetch(`${HA_HTTP_URL}/api/states/sensor.linky_yesterday_cost`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      state: costWithOverhead,
+      attributes: {
+        unit_of_measurement: '€',
+        friendly_name: 'Linky Yesterday Cost (with overhead)',
+        icon: 'mdi:currency-eur',
+        date: yesterday,
+      },
+    }),
+  });
+
+  debug(`publishSensorStates: pushed ${kwhYesterday} kWh / ${costWithOverhead} € for ${yesterday}`);
+}
+// end of ha-linky-plus addition
+
+  
 }

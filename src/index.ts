@@ -36,7 +36,9 @@ async function publishYesterdaySensorsFromData(
 
   const whYesterday = yesterdayEnergy.reduce((sum, d) => sum + d.value, 0);
   const kwhYesterday = Number((whYesterday / 1000).toFixed(2));
+  info(`[linky-plus] Energy raw sum: ${whYesterday} Wh → ${kwhYesterday} kWh`);
 
+  let costRaw = 0;
   let costWithOverhead = 0;
 
   if (costsData && costsData.length > 0) {
@@ -45,9 +47,13 @@ async function publishYesterdaySensorsFromData(
     );
 
     info(`[linky-plus] Found ${yesterdayCosts.length} cost points for yesterday`);
+    info(`[linky-plus] Sample cost points (first 3): ${JSON.stringify(yesterdayCosts.slice(0, 3))}`);
 
-    const costRaw = yesterdayCosts.reduce((sum, d) => sum + d.value, 0);
+    costRaw = yesterdayCosts.reduce((sum, d) => sum + d.value, 0);
     costWithOverhead = Number((costRaw + overhead).toFixed(2));
+
+    info(`[linky-plus] Cost raw sum: ${costRaw} €`);
+    info(`[linky-plus] Cost raw + overhead (${overhead}): ${costWithOverhead} €`);
   } else {
     info('[linky-plus] No cost data available');
   }
@@ -77,7 +83,7 @@ async function publishYesterdaySensorsFromData(
   if (!res1.ok) {
     warn(`[linky-plus] Failed to push kWh sensor: ${res1.status} ${await res1.text()}`);
   } else {
-    info('[linky-plus] kWh sensor published successfully');
+    info(`[linky-plus] kWh sensor published successfully → ${kwhYesterday} kWh`);
   }
 
   const res2 = await fetch(`${HA_HTTP_URL}/api/states/sensor.linky_yesterday_cost`, {
@@ -97,7 +103,7 @@ async function publishYesterdaySensorsFromData(
   if (!res2.ok) {
     warn(`[linky-plus] Failed to push cost sensor: ${res2.status} ${await res2.text()}`);
   } else {
-    info('[linky-plus] Cost sensor published successfully');
+    info(`[linky-plus] Cost sensor published successfully → ${costWithOverhead} € (raw: ${costRaw} + overhead: ${overhead})`);
   }
 }
 
@@ -144,7 +150,7 @@ async function main() {
 
     const client = new LinkyClient(config.token, config.prm, config.production);
 
-    // 🟢 ALWAYS fetch yesterday (for sensor publishing)
+    // Always fetch yesterday for sensor publishing
     const yesterdayStart = dayjs().subtract(1, 'day').startOf('day');
     const energyData = await client.getEnergyData(yesterdayStart);
 
@@ -154,15 +160,17 @@ async function main() {
 
     if (config.costs) {
       const entityHistory = await fetchEntityHistory(haClient, config.costs, energyData);
-      costsData = computeCosts(energyData, config.costs, entityHistory);
+      const rawCosts = computeCosts(energyData, config.costs, entityHistory);
+      costsData = groupDataPointsByHour(rawCosts);
     }
 
-    // 🟢 ALWAYS publish
+    // Group energy by hour to match statistics granularity
+    const groupedEnergyData = groupDataPointsByHour(energyData);
+
     if (!config.production) {
-      await publishYesterdaySensorsFromData(energyData, costsData);
+      await publishYesterdaySensorsFromData(groupedEnergyData, costsData);
     }
 
-    // 🔵 ONLY sync when needed
     if (!isSyncingNeeded) {
       debug('Skipping statistics sync (already up-to-date)');
       return;
@@ -244,6 +252,12 @@ async function main() {
 
   const randomMinute = Math.floor(Math.random() * 59);
   const randomSecond = Math.floor(Math.random() * 59);
+
+  info(
+    `Data synchronization planned every day at ` +
+      `06:${randomMinute.toString().padStart(2, '0')}:${randomSecond.toString().padStart(2, '0')} and ` +
+      `09:${randomMinute.toString().padStart(2, '0')}:${randomSecond.toString().padStart(2, '0')}`,
+  );
 
   cron.schedule(`${randomSecond} ${randomMinute} 6,9 * * *`, async () => {
     await haClient.connect();

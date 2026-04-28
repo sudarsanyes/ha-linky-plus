@@ -198,6 +198,7 @@ async function main() {
   }
 
   // ha-linky-plus addition
+  await new Promise(resolve => setTimeout(resolve, 5000)); // wait 5s for recorder to commit
   for (const config of userConfig.meters) {
     if (config?.action === 'sync' && !config.production) {
       await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
@@ -226,6 +227,7 @@ async function main() {
     }
 
     // ha-linky-plus addition
+    await new Promise(resolve => setTimeout(resolve, 5000)); // wait 5s for recorder to commit
     for (const config of userConfig.meters) {
       if (config.action === 'sync' && !config.production) {
         await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });

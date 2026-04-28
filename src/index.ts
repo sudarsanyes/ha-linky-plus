@@ -52,12 +52,10 @@ async function publishYesterdaySensorsFromData(
     info('[linky-plus] No cost data available');
   }
 
-  info(
-    `[linky-plus] Publishing sensors → ${kwhYesterday} kWh / ${costWithOverhead} € (${yesterday})`
-  );
+  info(`[linky-plus] Publishing sensors → ${kwhYesterday} kWh / ${costWithOverhead} € (${yesterday})`);
 
   const headers = {
-    'Authorization': `Bearer ${TOKEN}`,
+    Authorization: `Bearer ${TOKEN}`,
     'Content-Type': 'application/json',
   };
 
@@ -110,7 +108,6 @@ async function main() {
 
   if (userConfig.meters.length === 0) {
     warn('Add-on is not configured properly');
-    debug('HA Linky stopped');
     return;
   }
 
@@ -120,22 +117,15 @@ async function main() {
   for (const config of userConfig.meters) {
     if (config.action === 'reset') {
       await haClient.purge(config.prm, config.production);
-      info(`Statistics removed successfully for PRM ${config.prm} !`);
+      info(`Statistics removed successfully for PRM ${config.prm}`);
     }
-  }
-
-  if (userConfig.meters.every((config) => config.action !== 'sync')) {
-    haClient.disconnect();
-    info('Nothing to sync');
-    debug('HA Linky stopped');
-    return;
   }
 
   async function sync(config: MeterConfig) {
     info(
-      `[${dayjs().format('DD/MM HH:mm')}] Synchronization started for ${
+      `[${dayjs().format('DD/MM HH:mm')}] Sync start for ${
         config.production ? 'production' : 'consumption'
-      } data`,
+      }`,
     );
 
     const lastStatistic = await haClient.findLastStatistic({
@@ -144,7 +134,7 @@ async function main() {
     });
 
     if (!lastStatistic) {
-      warn(`Data synchronization failed, no previous statistic found in Home Assistant`);
+      warn('No previous statistics found');
       return;
     }
 
@@ -152,18 +142,36 @@ async function main() {
       dayjs(lastStatistic.start).isBefore(dayjs().subtract(2, 'days')) &&
       dayjs().hour() >= 6;
 
+    const client = new LinkyClient(config.token, config.prm, config.production);
+
+    // 🟢 ALWAYS fetch yesterday (for sensor publishing)
+    const yesterdayStart = dayjs().subtract(1, 'day').startOf('day');
+    const energyData = await client.getEnergyData(yesterdayStart);
+
+    info(`[linky-plus] Retrieved ${energyData.length} points for yesterday fetch`);
+
+    let costsData: DataPoint[] | undefined;
+
+    if (config.costs) {
+      const entityHistory = await fetchEntityHistory(haClient, config.costs, energyData);
+      costsData = computeCosts(energyData, config.costs, entityHistory);
+    }
+
+    // 🟢 ALWAYS publish
+    if (!config.production) {
+      await publishYesterdaySensorsFromData(energyData, costsData);
+    }
+
+    // 🔵 ONLY sync when needed
     if (!isSyncingNeeded) {
-      debug('Everything is up-to-date, nothing to synchronize');
+      debug('Skipping statistics sync (already up-to-date)');
       return;
     }
 
-    const client = new LinkyClient(config.token, config.prm, config.production);
     const firstDay = dayjs(lastStatistic.start).add(1, 'day');
-    const energyData = await client.getEnergyData(firstDay);
+    const fullData = await client.getEnergyData(firstDay);
 
-    info(`[linky-plus] Retrieved ${energyData.length} energy data points`);
-
-    const energyStatistics = formatAsStatistics(groupDataPointsByHour(energyData));
+    const energyStatistics = formatAsStatistics(groupDataPointsByHour(fullData));
 
     await haClient.saveStatistics({
       prm: config.prm,
@@ -172,14 +180,9 @@ async function main() {
       stats: incrementSums(energyStatistics, lastStatistic.sum),
     });
 
-    let costsData: DataPoint[] | undefined;
-
     if (config.costs) {
-      const entityHistory = await fetchEntityHistory(haClient, config.costs, energyData);
-      const costs = computeCosts(energyData, config.costs, entityHistory);
-      costsData = costs;
-
-      info(`[linky-plus] Computed ${costs.length} cost data points`);
+      const entityHistory = await fetchEntityHistory(haClient, config.costs, fullData);
+      const costs = computeCosts(fullData, config.costs, entityHistory);
 
       const costsStatistics = formatAsStatistics(groupDataPointsByHour(costs));
 
@@ -199,10 +202,6 @@ async function main() {
         });
       }
     }
-
-    if (!config.production) {
-      await publishYesterdaySensorsFromData(energyData, costsData);
-    }
   }
 
   async function fetchEntityHistory(
@@ -210,15 +209,9 @@ async function main() {
     costConfigs: MeterConfig['costs'],
     energyData: DataPoint[],
   ): Promise<EntityHistoryData | undefined> {
-    if (!costConfigs || costConfigs.length === 0) {
-      return undefined;
-    }
+    if (!costConfigs || costConfigs.length === 0) return undefined;
 
-    const entityIds = [...new Set(costConfigs.filter((c) => c.entity_id).map((c) => c.entity_id!))];
-
-    if (entityIds.length === 0) {
-      return undefined;
-    }
+    const entityIds = [...new Set(costConfigs.map(c => c.entity_id!).filter(Boolean))];
 
     const startTime = dayjs(energyData[0].date).subtract(1, 'day').toISOString();
     const endTime = dayjs(energyData[energyData.length - 1].date).add(1, 'day').toISOString();
@@ -227,14 +220,13 @@ async function main() {
 
     for (const entityId of entityIds) {
       try {
-        const history = await haClient.getEntityHistory({
+        entityHistory[entityId] = await haClient.getEntityHistory({
           entityId,
           startTime,
           endTime,
         });
-        entityHistory[entityId] = history;
       } catch (e) {
-        warn(`Failed to fetch history for entity ${entityId}: ${e.toString()}`);
+        warn(`History fetch failed for ${entityId}`);
         entityHistory[entityId] = [];
       }
     }
@@ -243,15 +235,8 @@ async function main() {
   }
 
   for (const config of userConfig.meters) {
-    if (config?.action === 'sync') {
-      const isNew = await haClient.isNewPRM({
-        prm: config.prm,
-        isProduction: config.production,
-      });
-
-      if (!isNew) {
-        await sync(config);
-      }
+    if (config.action === 'sync') {
+      await sync(config);
     }
   }
 

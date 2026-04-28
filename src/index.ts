@@ -148,14 +148,12 @@ async function main() {
       return undefined;
     }
 
-    // Extract unique entity IDs from cost configs
     const entityIds = [...new Set(costConfigs.filter((c) => c.entity_id).map((c) => c.entity_id!))];
 
     if (entityIds.length === 0) {
       return undefined;
     }
 
-    // Determine time range from energy data
     const startTime = dayjs(energyData[0].date).subtract(1, 'day').toISOString();
     const endTime = dayjs(energyData[energyData.length - 1].date)
       .add(1, 'day')
@@ -198,10 +196,14 @@ async function main() {
   }
 
   // ha-linky-plus addition
-  await new Promise(resolve => setTimeout(resolve, 5000)); // wait 5s for recorder to commit
+  await new Promise(resolve => setTimeout(resolve, 5000));
   for (const config of userConfig.meters) {
     if (config?.action === 'sync' && !config.production) {
-      await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
+      try {
+        await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
+      } catch (e) {
+        warn('publishSensorStates failed: ' + e.toString());
+      }
     }
   }
   // end of ha-linky-plus addition
@@ -227,10 +229,14 @@ async function main() {
     }
 
     // ha-linky-plus addition
-    await new Promise(resolve => setTimeout(resolve, 5000)); // wait 5s for recorder to commit
+    await new Promise(resolve => setTimeout(resolve, 5000));
     for (const config of userConfig.meters) {
       if (config.action === 'sync' && !config.production) {
-        await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
+        try {
+          await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
+        } catch (e) {
+          warn('publishSensorStates failed: ' + e.toString());
+        }
       }
     }
     // end of ha-linky-plus addition

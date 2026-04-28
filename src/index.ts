@@ -8,12 +8,92 @@ import { debug, error, info, warn } from './log.js';
 import cron from 'node-cron';
 import dayjs from 'dayjs';
 
+const HA_HTTP_URL = (process.env.WS_URL || 'ws://supervisor/core/websocket')
+  .replace(/^ws/, 'http')
+  .replace('/websocket', '');
+
+const TOKEN = process.env.SUPERVISOR_TOKEN;
+
+async function publishYesterdaySensorsFromData(
+  energyData: DataPoint[],
+  costsData: DataPoint[] | undefined,
+  overhead = 0.826,
+) {
+  const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+
+  const yesterdayEnergy = energyData.filter(d =>
+    dayjs(d.date).format('YYYY-MM-DD') === yesterday
+  );
+
+  if (yesterdayEnergy.length === 0) {
+    warn('No energy data found for yesterday');
+    return;
+  }
+
+  const whYesterday = yesterdayEnergy.reduce((sum, d) => sum + d.value, 0);
+  const kwhYesterday = Number((whYesterday / 1000).toFixed(2));
+
+  let costWithOverhead = 0;
+
+  if (costsData && costsData.length > 0) {
+    const yesterdayCosts = costsData.filter(d =>
+      dayjs(d.date).format('YYYY-MM-DD') === yesterday
+    );
+
+    const costRaw = yesterdayCosts.reduce((sum, d) => sum + d.value, 0);
+    costWithOverhead = Number((costRaw + overhead).toFixed(2));
+  }
+
+  const headers = {
+    'Authorization': `Bearer ${TOKEN}`,
+    'Content-Type': 'application/json',
+  };
+
+  const res1 = await fetch(`${HA_HTTP_URL}/api/states/sensor.linky_yesterday_kwh`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      state: kwhYesterday,
+      attributes: {
+        unit_of_measurement: 'kWh',
+        friendly_name: 'Linky Yesterday Consumption',
+        device_class: 'energy',
+        state_class: 'measurement',
+        date: yesterday,
+      },
+    }),
+  });
+
+  if (!res1.ok) {
+    warn(`Failed to push kWh sensor: ${res1.status} ${await res1.text()}`);
+  }
+
+  const res2 = await fetch(`${HA_HTTP_URL}/api/states/sensor.linky_yesterday_cost`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      state: costWithOverhead,
+      attributes: {
+        unit_of_measurement: '€',
+        friendly_name: 'Linky Yesterday Cost (with overhead)',
+        icon: 'mdi:currency-eur',
+        date: yesterday,
+      },
+    }),
+  });
+
+  if (!res2.ok) {
+    warn(`Failed to push cost sensor: ${res2.status} ${await res2.text()}`);
+  }
+
+  debug(`Pushed yesterday sensors: ${kwhYesterday} kWh / ${costWithOverhead} € (${yesterday})`);
+}
+
 async function main() {
   debug('HA Linky is starting');
 
   const userConfig = getUserConfig();
 
-  // Stop if configuration is empty
   if (userConfig.meters.length === 0) {
     warn('Add-on is not configured properly');
     debug('HA Linky stopped');
@@ -23,7 +103,6 @@ async function main() {
   const haClient = new HomeAssistantClient();
   await haClient.connect();
 
-  // Reset statistics if needed
   for (const config of userConfig.meters) {
     if (config.action === 'reset') {
       await haClient.purge(config.prm, config.production);
@@ -31,56 +110,11 @@ async function main() {
     }
   }
 
-  // Stop if nothing else to do
   if (userConfig.meters.every((config) => config.action !== 'sync')) {
     haClient.disconnect();
     info('Nothing to sync');
     debug('HA Linky stopped');
     return;
-  }
-
-  async function init(config: MeterConfig) {
-    info(
-      `[${dayjs().format('DD/MM HH:mm')}] New PRM detected, historical ${
-        config.production ? 'production' : 'consumption'
-      } data import is starting`,
-    );
-
-    let energyData = await getMeterHistory(config.prm, config.production);
-
-    if (energyData.length === 0) {
-      const client = new LinkyClient(config.token, config.prm, config.production);
-      energyData = await client.getEnergyData(null);
-    }
-
-    if (energyData.length === 0) {
-      warn(`No history found for PRM ${config.prm}`);
-      return;
-    }
-    const energyStatistics = formatAsStatistics(groupDataPointsByHour(energyData));
-
-    await haClient.saveStatistics({
-      prm: config.prm,
-      name: config.name,
-      isProduction: config.production,
-      stats: energyStatistics,
-    });
-
-    if (config.costs) {
-      const entityHistory = await fetchEntityHistory(haClient, config.costs, energyData);
-      const costs = computeCosts(energyData, config.costs, entityHistory);
-      const costsStatistics = formatAsStatistics(groupDataPointsByHour(costs));
-
-      if (costsStatistics.length > 0) {
-        await haClient.saveStatistics({
-          prm: config.prm,
-          name: config.name,
-          isProduction: config.production,
-          isCost: true,
-          stats: costsStatistics,
-        });
-      }
-    }
   }
 
   async function sync(config: MeterConfig) {
@@ -94,16 +128,21 @@ async function main() {
       prm: config.prm,
       isProduction: config.production,
     });
+
     if (!lastStatistic) {
       warn(`Data synchronization failed, no previous statistic found in Home Assistant`);
       return;
     }
 
-    const isSyncingNeeded = dayjs(lastStatistic.start).isBefore(dayjs().subtract(2, 'days')) && dayjs().hour() >= 6;
+    const isSyncingNeeded =
+      dayjs(lastStatistic.start).isBefore(dayjs().subtract(2, 'days')) &&
+      dayjs().hour() >= 6;
+
     if (!isSyncingNeeded) {
       debug('Everything is up-to-date, nothing to synchronize');
       return;
     }
+
     const client = new LinkyClient(config.token, config.prm, config.production);
     const firstDay = dayjs(lastStatistic.start).add(1, 'day');
     const energyData = await client.getEnergyData(firstDay);
@@ -117,9 +156,13 @@ async function main() {
       stats: incrementSums(energyStatistics, lastStatistic.sum),
     });
 
+    let costsData: DataPoint[] | undefined;
+
     if (config.costs) {
       const entityHistory = await fetchEntityHistory(haClient, config.costs, energyData);
       const costs = computeCosts(energyData, config.costs, entityHistory);
+      costsData = costs;
+
       const costsStatistics = formatAsStatistics(groupDataPointsByHour(costs));
 
       if (costsStatistics.length > 0) {
@@ -128,6 +171,7 @@ async function main() {
           isProduction: config.production,
           isCost: true,
         });
+
         await haClient.saveStatistics({
           prm: config.prm,
           name: config.name,
@@ -136,6 +180,11 @@ async function main() {
           stats: incrementSums(costsStatistics, lastCostStatistic?.sum || 0),
         });
       }
+    }
+
+    // ✅ New: publish yesterday immediately (no delay, no HA read)
+    if (!config.production) {
+      await publishYesterdaySensorsFromData(energyData, costsData);
     }
   }
 
@@ -155,9 +204,7 @@ async function main() {
     }
 
     const startTime = dayjs(energyData[0].date).subtract(1, 'day').toISOString();
-    const endTime = dayjs(energyData[energyData.length - 1].date)
-      .add(1, 'day')
-      .toISOString();
+    const endTime = dayjs(energyData[energyData.length - 1].date).add(1, 'day').toISOString();
 
     const entityHistory: EntityHistoryData = {};
 
@@ -178,68 +225,32 @@ async function main() {
     return entityHistory;
   }
 
-  // Initialize or sync data
   for (const config of userConfig.meters) {
     if (config?.action === 'sync') {
-      info(`PRM ${config.prm} found in configuration for ${config.production ? 'production' : 'consumption'}`);
-
       const isNew = await haClient.isNewPRM({
         prm: config.prm,
         isProduction: config.production,
       });
-      if (isNew) {
-        await init(config);
-      } else {
+
+      if (!isNew) {
         await sync(config);
       }
     }
   }
 
-  // ha-linky-plus addition
-  await new Promise(resolve => setTimeout(resolve, 5000));
-  for (const config of userConfig.meters) {
-    if (config?.action === 'sync' && !config.production) {
-      try {
-        await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
-      } catch (e) {
-        warn('publishSensorStates failed: ' + e.toString());
-      }
-    }
-  }
-  // end of ha-linky-plus addition
-
   haClient.disconnect();
 
-  // Setup cron job
   const randomMinute = Math.floor(Math.random() * 59);
   const randomSecond = Math.floor(Math.random() * 59);
 
-  info(
-    `Data synchronization planned every day at ` +
-      `06:${randomMinute.toString().padStart(2, '0')}:${randomSecond.toString().padStart(2, '0')} and ` +
-      `09:${randomMinute.toString().padStart(2, '0')}:${randomSecond.toString().padStart(2, '0')}`,
-  );
-
   cron.schedule(`${randomSecond} ${randomMinute} 6,9 * * *`, async () => {
     await haClient.connect();
+
     for (const config of userConfig.meters) {
       if (config.action === 'sync') {
         await sync(config);
       }
     }
-
-    // ha-linky-plus addition
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    for (const config of userConfig.meters) {
-      if (config.action === 'sync' && !config.production) {
-        try {
-          await haClient.publishSensorStates({ prm: config.prm, isProduction: config.production });
-        } catch (e) {
-          warn('publishSensorStates failed: ' + e.toString());
-        }
-      }
-    }
-    // end of ha-linky-plus addition
 
     haClient.disconnect();
   });

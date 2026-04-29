@@ -19,10 +19,10 @@ export type CostConfig = {
   end_date?: string;
 };
 
-export type UserConfig = { meters: MeterConfig[] };
+export type UserConfig = { meters: MeterConfig[]; overhead: number };
 
 export function getUserConfig(): UserConfig {
-  let parsed: { meters?: any[]; costs?: any } = {};
+  let parsed: { meters?: any[]; costs?: any; overhead?: number } = {};
 
   try {
     parsed = JSON.parse(readFileSync('/data/options.json', 'utf8'));
@@ -30,7 +30,11 @@ export function getUserConfig(): UserConfig {
     throw new Error('Cannot read user configuration: ' + e.toString());
   }
 
-  const result: UserConfig = { meters: [] };
+  const result: UserConfig = { meters: [], overhead: 0.826 };
+
+  if (typeof parsed.overhead === 'number') {
+    result.overhead = parsed.overhead;
+  }
 
   if (parsed.meters && Array.isArray(parsed.meters) && parsed.meters.length > 0) {
     for (const meter of parsed.meters) {

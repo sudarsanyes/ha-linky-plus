@@ -168,7 +168,7 @@ async function main() {
     const groupedEnergyData = groupDataPointsByHour(energyData);
 
     if (!config.production) {
-      await publishYesterdaySensorsFromData(groupedEnergyData, costsData);
+      await publishYesterdaySensorsFromData(groupedEnergyData, costsData, userConfig.overhead);
     }
 
     if (!isSyncingNeeded) {

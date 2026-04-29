@@ -13,7 +13,8 @@ The original ha-linky syncs your Linky smart meter data directly into Home Assis
 | `sensor.linky_yesterday_kwh` | Yesterday's total consumption in kWh |
 | `sensor.linky_yesterday_cost` | Yesterday's total cost in € (tariff + configurable daily overhead) |
 
-These sensors can be used anywhere in Home Assistant — markdown cards, template sensors, ApexCharts, automations, and more.
+These sensors can be used anywhere in Home Assistant — markdown cards, template sensors, ApexCharts, automations, and more. 
+
 <img
   src="https://github.com/user-attachments/assets/015abb5b-e903-44ba-b68f-ff6102b51428"
   style="height: 480px; width: auto; align: left;"

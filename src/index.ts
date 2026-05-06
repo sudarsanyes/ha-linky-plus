@@ -156,6 +156,12 @@ async function main() {
 
     info(`[linky-plus] Retrieved ${energyData.length} points for yesterday fetch`);
 
+    // Guard — if API returned nothing, skip publish and stop here
+    if (energyData.length === 0) {
+      warn('[linky-plus] No data retrieved from API, skipping sensor publish and statistics sync');
+      return;
+    }
+
     let costsData: DataPoint[] | undefined;
 
     if (config.costs) {
